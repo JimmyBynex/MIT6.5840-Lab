@@ -1,7 +1,9 @@
 package lock
 
 import (
-	"6.5840/kvtest1"
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	"github.com/google/uuid"
 )
 
 type Lock struct {
@@ -11,6 +13,7 @@ type Lock struct {
 	// MakeLock().
 	ck kvtest.IKVClerk
 	// You may add code here
+	l string // the lock name
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -21,13 +24,63 @@ type Lock struct {
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	// You may add code here
+	lk.l = l
 	return lk
 }
 
 func (lk *Lock) Acquire() {
 	// Your code here
+	for {
+		value, version, err := lk.ck.Get(lk.l)
+		if value == "free" || err == rpc.ErrNoKey || value == "" {
+			id := uuid.New().String()
+			err := lk.ck.Put(lk.l, id, version)
+			if err == rpc.OK {
+				return
+			}
+			if err == rpc.ErrMaybe {
+				for {
+					_, Newversion, err := lk.ck.Get(lk.l)
+					if err == rpc.OK {
+						if Newversion == version+1 {
+							if value, _, _ := lk.ck.Get(lk.l); value == id {
+								return
+							}
+							break
+						} else {
+							break
+						}
+					}
+				}
+			}
+		}
+
+	}
+
 }
 
 func (lk *Lock) Release() {
 	// Your code here
+
+	for {
+		//必须放在循环内，这样才能保证每次获取的都是最新的version
+		_, version, _ := lk.ck.Get(lk.l)
+		err := lk.ck.Put(lk.l, "free", version)
+		if err == rpc.OK {
+			return
+		}
+		if err == rpc.ErrMaybe {
+			for {
+				_, Newversion, err := lk.ck.Get(lk.l)
+				if err == rpc.OK {
+					if Newversion == version+1 {
+						return
+					} else {
+						break
+					}
+				}
+			}
+		}
+
+	}
 }
