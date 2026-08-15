@@ -73,6 +73,7 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
 		if ok {
 			if reply.Err == rpc.ErrVersion {
+				//有可能因为上次请求成功但是没收到响应，不能直接判断
 				if firstCall {
 					return rpc.ErrVersion
 				} else {

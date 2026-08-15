@@ -47,6 +47,8 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 		reply.Version = e.version
 		reply.Err = rpc.OK
 	} else {
+		reply.Value = ""
+		reply.Version = 0
 		reply.Err = rpc.ErrNoKey
 	}
 }
