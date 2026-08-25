@@ -55,6 +55,8 @@ type Raft struct {
 	matchIndex []int
 
 	electionGen int
+
+	replicateCh chan struct{}
 }
 
 type ServerState int
@@ -63,8 +65,8 @@ type LogEntry struct {
 	Command interface{}
 }
 
-// 长下标（论文/RPC/Start/next/match/commit/lastApplied）= 短下标 + lastIncludedIndex
-// log[0] 是 lastIncludedIndex 那条（初始 dummy）。访问 rf.log 必须先减。
+// 长下标= 短下标 + lastIncludedIndex
+// log[0] 是 lastIncludedIndex 那条（初始 dummy）。
 
 // 对于这种软性限制，也就是业务限制的，使用helper函数，其他的感觉没必要
 func (rf *Raft) lastLogIndex() int {
@@ -444,6 +446,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.lastLogIndex()
 		rf.persist()
 		rf.mu.Unlock()
+		select {
+		case rf.replicateCh <- struct{}{}:
+		default:
+		}
 	}
 
 	return index, term, isLeader
@@ -552,7 +558,7 @@ func (rf *Raft) askForVote(term int) {
 				numGetVoted++
 				won := numGetVoted > len(rf.peers)/2
 				tmpMu.Unlock()
-				if won && rf.state == Candidate && rf.currentTerm == term {
+				if won {
 					rf.state = Leader
 					for j := range rf.peers {
 						rf.nextIndex[j] = rf.lastLogIndex() + 1
@@ -719,7 +725,12 @@ func (rf *Raft) sendHeartBeat(term int) {
 				}
 			}(i)
 		}
-		time.Sleep(100 * time.Millisecond)
+
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-rf.replicateCh:
+		}
+
 	}
 }
 
@@ -758,6 +769,7 @@ func (rf *Raft) applier(applyCh chan raftapi.ApplyMsg) {
 		}
 		rf.mu.Unlock()
 	}
+	close(applyCh)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -790,6 +802,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	n := len(peers)
 	rf.nextIndex = make([]int, n)
 	rf.matchIndex = make([]int, n)
+	rf.replicateCh = make(chan struct{}, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

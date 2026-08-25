@@ -2,15 +2,15 @@ package kvraft
 
 import (
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
 )
-
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
 	// You will have to modify this struct.
+	leader int
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
@@ -31,8 +31,19 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
-	// You will have to modify this function.
-	return "", 0, ""
+	var args rpc.GetArgs
+	args.Key = key
+	for {
+		var reply rpc.GetReply
+
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Get", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			continue
+		}
+
+		return reply.Value, reply.Version, reply.Err
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -53,6 +64,30 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	var args rpc.PutArgs
+	args.Key = key
+	args.Value = value
+	args.Version = version
+
+	firstCall := true
+	for {
+		var reply rpc.PutReply
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			ck.leader = (ck.leader + 1) % len(ck.servers)
+			firstCall = false
+			continue
+		}
+
+		if reply.Err == rpc.ErrVersion {
+			if firstCall {
+				return rpc.ErrVersion
+			} else {
+				return rpc.ErrMaybe
+			}
+		}
+
+		return reply.Err
+
+	}
 }

@@ -2,24 +2,24 @@ package rsm
 
 import (
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Me  int
+	Req any
 }
-
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -41,6 +41,13 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+
+	waiting map[int]chan opReply
+}
+
+type opReply struct {
+	err rpc.Err
+	rep any
 }
 
 // servers[] contains the ports of the set of
@@ -64,17 +71,22 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		waiting:      make(map[int]chan opReply),
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	if data := persister.ReadSnapshot(); len(data) > 0 {
+		sm.Restore(data)
+	}
+	go rsm.reader()
 	return rsm
 }
 
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -86,5 +98,91 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	rsm.mu.Lock()
+
+	op := Op{
+		Me:  rsm.me,
+		Req: req,
+	}
+	index, preTerm, isLeader := rsm.rf.Start(op)
+
+	result := make(chan opReply, 1)
+	rsm.waiting[index] = result
+
+	if !isLeader {
+		delete(rsm.waiting, index)
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	rsm.mu.Unlock()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case opReply := <-result:
+			rsm.mu.Lock()
+			delete(rsm.waiting, index)
+			rsm.mu.Unlock()
+
+			return opReply.err, opReply.rep
+		//错误的term，不是leader一定超时，但是超时不一定是错误term或者不是leader
+		case <-ticker.C:
+			curTerm, isLeader := rsm.rf.GetState()
+			if !isLeader || curTerm != preTerm {
+				rsm.mu.Lock()
+				delete(rsm.waiting, index)
+				rsm.mu.Unlock()
+				return rpc.ErrWrongLeader, nil
+			}
+		}
+	}
+}
+
+func (rsm *RSM) reader() {
+	for {
+
+		command, ok := <-rsm.applyCh
+
+		//代表被kill了
+		if !ok {
+			rsm.mu.Lock()
+			for _, ch := range rsm.waiting {
+				ch <- opReply{err: rpc.ErrWrongLeader}
+			}
+			rsm.mu.Unlock()
+			return
+		}
+
+		//普通日志的话
+		if command.CommandValid {
+			op := command.Command.(Op)
+			result := rsm.sm.DoOp(op.Req)
+			rsm.mu.Lock()
+			ch, ok := rsm.waiting[command.CommandIndex]
+			rsm.mu.Unlock()
+			if ok && op.Me == rsm.me {
+				ch <- opReply{
+					err: rpc.OK,
+					rep: result,
+				}
+			}
+
+			//发送给kvserver，回复client后，再进行监测
+			//可以考虑异步
+
+			//agent提示不能异步，应为有可能打乱顺序性
+			if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+				snapshot := rsm.sm.Snapshot()
+				rsm.rf.Snapshot(command.CommandIndex, snapshot)
+
+			}
+		}
+
+		if command.SnapshotValid {
+			//如果是收到别的服务器发来的snapshot，要使用restore
+			rsm.sm.Restore(command.Snapshot)
+		}
+
+	}
 }
