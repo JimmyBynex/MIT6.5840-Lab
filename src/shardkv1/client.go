@@ -9,17 +9,19 @@ package shardkv
 //
 
 import (
-
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardctrler"
-	"6.5840/tester1"
+	"6.5840/shardkv1/shardgrp"
+	tester "6.5840/tester1"
 )
 
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
 	// You will have to modify this struct.
+	leader int
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -33,7 +35,6 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 	return ck
 }
 
-
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read
 // the current configuration and lookup the servers in the group
@@ -41,11 +42,43 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, ""
+	shardId := shardcfg.Key2Shard(key)
+
+	for {
+		cfg := ck.sck.Query()
+		grpId := cfg.Shards[shardId]
+		servers := cfg.Groups[grpId]
+
+		clerk := shardgrp.MakeClerk(ck.clnt, servers)
+
+		value, version, err := clerk.Get(key)
+		if err != rpc.ErrWrongGroup {
+			return value, version, err
+		}
+	}
+
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	shardId := shardcfg.Key2Shard(key)
+	maybe := false
+	for {
+		cfg := ck.sck.Query()
+		grpId := cfg.Shards[shardId]
+		servers := cfg.Groups[grpId]
+
+		clerk := shardgrp.MakeClerk(ck.clnt, servers)
+
+		err := clerk.Put(key, value, version)
+		if err == rpc.ErrWrongGroup {
+			maybe = true
+			continue
+		}
+		if err == rpc.ErrVersion && maybe {
+			return rpc.ErrMaybe
+		}
+		return err
+	}
 }

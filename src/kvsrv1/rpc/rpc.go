@@ -14,6 +14,9 @@ const (
 	// For future kvraft lab
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrWrongGroup  = "ErrWrongGroup"
+
+	// Incoming config Num is older than the shard's local Num
+	ErrStaleNum = "ErrStaleNum"
 )
 
 type Tversion uint64
